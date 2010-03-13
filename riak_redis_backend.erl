@@ -13,12 +13,12 @@
 %% specific language governing permissions and limitations
 %% under the License.    
 
-%% @doc riak_redis_backend is a Riak storage backend using erldis.
+%% @doc riak_redis_backend is a Riak storage backend using redis_drv.
 
 
 -module(riak_redis_backend).
 -author('Eric Cestari <eric@ohmforce.com').
--export([start/1,stop/1,get/2,put/3,list/1,list_bucket/2,delete/2]).
+-export([start/1,start/2,stop/1,get/2,put/3,list/1,list_bucket/2,delete/2]).
 
 
 -define(RSEND(V), redis_send(fun()-> V end)).
@@ -28,7 +28,12 @@
 % @spec start(Partition :: integer()) ->
 %                        {ok, state()} | {{error, Reason :: term()}, state()}
 start(Partition)->
-  {ok, Pid} = erldis_sync_client:connect(),
+  {ok, Pid} = redis_drv:start_link(),
+  P=list_to_binary(atom_to_list(node()) ++ integer_to_list(Partition)),
+  {ok, #state{pid=Pid, partition = P}}.
+  
+start(Partition, _Config)->
+  {ok, Pid} = redis_drv:start_link(),
   P=list_to_binary(atom_to_list(node()) ++ integer_to_list(Partition)),
   {ok, #state{pid=Pid, partition = P}}.
 
@@ -39,7 +44,7 @@ stop(_State)->
 % get(state(), Key :: binary()) ->
 %   {ok, Val :: binary()} | {error, Reason :: term()}
 get(#state{partition=P, pid=Pid}, BK)->
-  case erldis:get(Pid, k2l(P,BK)) of
+  case redis_drv:get(Pid, k2l(P,BK)) of
     nil -> {error, notfound};
     Val -> 
     case catch binary_to_term(Val) of
@@ -52,15 +57,15 @@ get(#state{partition=P, pid=Pid}, BK)->
 
 % put(state(), Key :: binary(), Val :: binary()) ->
 %   ok | {error, Reason :: term()}  
-put(#state{partition=P,pid=Pid}, {Bucket, Key}=BK, Value)->
+put(#state{partition=P, pid=Pid}, {Bucket, Key}=BK, Value)->
   %Fun = fun(_C)->
-    erldis:set_pipelining(Pid,true),
-    erldis:sadd(Pid, <<"buckets:",P/binary>>,Bucket),
-    erldis:set(Pid, k2l(P,BK), term_to_binary(Value)),
-    erldis:sadd(Pid, <<P/binary,Bucket/binary>>, Key),
-    erldis:sadd(Pid, <<"world:",P/binary>>, term_to_binary(BK)),
-    erldis:get_all_results(Pid),
-    erldis:set_pipelining(Pid,false),
+    % erldis:set_pipelining(Pid,true),
+    redis_drv:sadd(Pid, <<"buckets:",P/binary>>,Bucket),
+    redis_drv:set(Pid, k2l(P,BK), term_to_binary(Value)),
+    redis_drv:sadd(Pid, <<P/binary,Bucket/binary>>, Key),
+    redis_drv:sadd(Pid, <<"world:",P/binary>>, term_to_binary(BK)),
+    % erldis:get_all_results(Pid),
+    % erldis:set_pipelining(Pid,false),
     ok.
   %end,
   %case  erldis:exec(Pid, Fun) of
@@ -73,15 +78,15 @@ put(#state{partition=P,pid=Pid}, {Bucket, Key}=BK, Value)->
 
 % delete(state(), Key :: binary()) ->
 %   ok | {error, Reason :: term()}
-delete(#state {partition=P, pid=Pid }, {Bucket, Key}=BK) ->
+delete(#state {partition=P, pid=Pid}, {Bucket, Key}=BK) ->
   %Fun = fun(_C)->
-    erldis:set_pipelining(Pid,true),
-    erldis:srem(Pid, <<"buckets:",P/binary>>,Bucket),
-    erldis:del(Pid, k2l(P,BK)),
-    erldis:srem(Pid, <<P/binary,Bucket/binary>>, Key),
-    erldis:srem(Pid, <<"world:",P/binary>>, term_to_binary(BK)),
-    erldis:get_all_results(Pid),
-    erldis:set_pipelining(Pid,false),
+    % redis_drv:set_pipelining(Pid,true),
+    redis_drv:srem(Pid, <<"buckets:",P/binary>>,Bucket),
+    redis_drv:del(Pid, k2l(P,BK)),
+    redis_drv:srem(Pid, <<P/binary,Bucket/binary>>, Key),
+    redis_drv:srem(Pid, <<"world:",P/binary>>, term_to_binary(BK)),
+    % redis_drv:get_all_results(Pid),
+    % redis_drv:set_pipelining(Pid,false),
   ok.
   %end,
   %case erldis:exec(Pid, Fun) of
@@ -92,17 +97,17 @@ delete(#state {partition=P, pid=Pid }, {Bucket, Key}=BK) ->
   %end.
   
 % list(state()) -> [Key :: binary()]
-list(#state {partition=P, pid=Pid }) ->
+list(#state {partition=P, pid=Pid}) ->
   lists:map(fun binary_to_term/1, 
-      erldis:smembers(Pid, <<"world:",P/binary>>)).
+      redis_drv:smembers(Pid, <<"world:",P/binary>>)).
 
-list_bucket(#state {partition=P, pid=Pid }, '_')->
-  erldis:smembers(Pid, <<"buckets:",P/binary>>);  
+list_bucket(#state{partition=P, pid=Pid}, '_')->
+  redis_drv:smembers(Pid, <<"buckets:",P/binary>>);  
     
-list_bucket(#state {partition=P, pid=Pid }, {filter, Bucket, Fun})->
-  lists:filter(Fun, erldis:smembers(Pid, <<P/binary,Bucket/binary>>));
-list_bucket(#state {partition=P,  pid=Pid }, Bucket) ->
-  erldis:smembers(Pid, <<P/binary,Bucket/binary>>).
+list_bucket(#state{partition=P, pid=Pid}, {filter, Bucket, Fun})->
+  lists:filter(Fun, redis_drv:smembers(Pid, <<P/binary,Bucket/binary>>));
+list_bucket(#state{partition=P, pid=Pid}, Bucket) ->
+  redis_drv:smembers(Pid, <<P/binary,Bucket/binary>>).
 
 k2l(P,{B, V})->
   <<P/binary,B/binary,V/binary>>.
